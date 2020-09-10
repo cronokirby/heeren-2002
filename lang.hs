@@ -2,7 +2,9 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 
+import Debug.Trace
 import Control.Monad.Except
+
 import Control.Monad.Reader
 import Control.Monad.State
 import Data.List (delete, find)
@@ -65,7 +67,7 @@ data Expr t
   | -- A function application between two expressions
     Apply (Expr t) (Expr t)
   | -- A lambda introducing a new variable, and producing an expression
-    Lambda Var t (Expr t)
+    Lambda Var (Expr t)
   | -- Represents a let expression, binding a variable known to have type t to an expression
     -- and then uses that inside the resulting expression
     Let Var t (Expr t) (Expr t)
@@ -75,7 +77,7 @@ data Expr t
 data Unknown = Unknown deriving (Eq, Show)
 
 -- Represents some kind of type error in our language
-data TypeError = TypeMismatch Type Type | InfiniteType TVar Type deriving (Eq, Show)
+data TypeError = TypeMismatch Type Type | InfiniteType TVar Type | UnboundVar Var deriving (Eq, Show)
 
 {- CONSTRAINTS & SUBSTUTITIONS
 
@@ -229,6 +231,10 @@ extendAssumption v t as = singleAssumption v t <> as
 lookupAssumption :: Var -> Assumption -> [Type]
 lookupAssumption target (Assumption as) = [t | (v, t) <- as, v == target]
 
+-- Get a set of all of the variables inside an assumption
+assumptionVars :: Assumption -> Set.Set Var
+assumptionVars (Assumption as) = Set.fromList (map fst as)
+
 -- Infer the assumptions and constraints for an expression
 infer :: Expr t -> Infer (Assumption, [Constraint], Type)
 infer expr = case expr of
@@ -237,7 +243,7 @@ infer expr = case expr of
   Name v -> do
     tv <- TVar <$> fresh
     return (singleAssumption v tv, [], tv)
-  Lambda v _ e -> do
+  Lambda v e -> do
     a <- fresh
     let tv = TVar a
     (as, cs, t) <- withCtx a (infer e)
@@ -303,3 +309,55 @@ bind a t
   | t == TVar a = return mempty
   | Set.member a (ftv t) = throwError (InfiniteType a t)
   | otherwise = return (singleSubst a t)
+
+{- TYPED TREE GENERATION -}
+
+-- An environment maps variables to schemes
+newtype Env = Env (Map.Map Var Scheme) deriving (Show)
+
+emptyEnv :: Env
+emptyEnv = Env (Map.empty)
+
+-- Extend an environment with a new binding
+extendEnv :: Var -> Scheme -> Env -> Env
+extendEnv v s (Env mp) = Env (Map.insert v s mp)
+
+-- Return all of the bindings making up the environment
+envBindings :: Env -> [(Var, Scheme)]
+envBindings (Env mp) = Map.toList mp
+
+-- Return all of the variables bound in an environment
+envVars :: Env -> Set.Set Var
+envVars = Set.fromList . map fst . envBindings
+
+-- Infer the type for a given expression, inside of a given environment
+inferType :: Show t => Expr t -> ReaderT Env Infer Type
+inferType expr = do
+  env <- ask
+  (as, cs, t) <- lift (infer expr)
+  let unbounds = Set.difference (assumptionVars as) (envVars env)
+  unless (Set.null unbounds) (throwError (UnboundVar (Set.findMin unbounds)))
+  let cs' = [ExplicitlyInstantiates t s | (x, s) <- envBindings env, t <- lookupAssumption x as]
+  sub <- lift (solve (cs' <> cs))
+  return (subst sub t)
+
+typeCheck :: Show t => Expr t -> ReaderT Env Infer (Expr Scheme)
+typeCheck expr = case expr of
+  IntLitt n -> return (IntLitt n)
+  StrLitt s -> return (StrLitt s)
+  Name v -> return (Name v)
+  Apply e1 e2 -> Apply <$> typeCheck e1 <*> typeCheck e2
+  BinOp op e1 e2 -> BinOp op <$> typeCheck e1 <*> typeCheck e2
+  Lambda v e -> do
+    let scheme' = Forall ["x"] (TVar "x")
+    e' <- local (extendEnv v scheme') (typeCheck e)
+    return (Lambda v e')
+  Let v _ e1 e2 -> do
+    tv <- inferType e1
+    let scheme = generalize Set.empty tv
+    e1' <- typeCheck e1
+    e2' <- local (extendEnv v scheme) (typeCheck e2)
+    return (Let v scheme e1' e2')
+
+typeTree :: Show t => Expr t -> Either TypeError (Expr Scheme)
+typeTree expr = runInfer (runReaderT (typeCheck expr) emptyEnv)
