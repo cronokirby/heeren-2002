@@ -1,3 +1,8 @@
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE TypeSynonymInstances #-}
+
+import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
 {- BASIC DEFINITIONS
@@ -75,8 +80,44 @@ generation phase, and then consumed to produce a substitution.
 -- and allows us to eventually produce a valid substitution for these variables
 data Constraint
   = -- An assertion that two types must be equal
-    EqConst Type Type
+    SameType Type Type
   | -- An assertion that a type can be seen as an instance of some scheme
     ExplicitlyInstantiates Type Scheme
   | -- An assertion that the first type should be an instance of the second, generalized over some type variables
     ImplicitlyInstantiates Type (Set.Set TVar) Type
+
+-- Represents a substitution of some type variables for a given type
+newtype Subst = Subst (Map.Map TVar Type) deriving (Eq, Show, Semigroup, Monoid)
+
+-- Create a singleton substitution
+singleSubst :: TVar -> Type -> Subst
+singleSubst v t = Subst (Map.singleton v t)
+
+-- Represents some kind of type where we can use a substitution
+class Substitutable a where
+  subst :: Subst -> a -> a
+
+instance (Ord a, Substitutable a) => Substitutable (Set.Set a) where
+  subst = Set.map . subst
+
+instance Substitutable TVar where
+  subst (Subst s) a = case Map.findWithDefault (TVar a) a s of
+    TVar tv -> tv
+    _ -> a
+
+instance Substitutable Type where
+  subst sub@(Subst s) t = case t of
+    TInt -> TInt
+    TString -> TString
+    TVar a -> Map.findWithDefault (TVar a) a s
+    TFunc t1 t2 -> TFunc (subst sub t1) (subst sub t2)
+
+instance Substitutable Scheme where
+  subst (Subst s) (Forall vars t) = Forall vars (subst s' t)
+    where
+      s' = Subst (foldr Map.delete s vars)
+
+instance Substitutable Constraint where
+  subst s (SameType t1 t2) = SameType (subst s t1) (subst s t2)
+  subst s (ExplicitlyInstantiates t sc) = ExplicitlyInstantiates (subst s t) (subst s sc)
+  subst s (ImplicitlyInstantiates t1 vars t2) = ImplicitlyInstantiates (subst s t1) (subst s vars) (subst s t2)
