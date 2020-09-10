@@ -97,7 +97,13 @@ data Constraint
   deriving (Eq, Show)
 
 -- Represents a substitution of some type variables for a given type
-newtype Subst = Subst (Map.Map TVar Type) deriving (Eq, Show, Semigroup, Monoid)
+newtype Subst = Subst (Map.Map TVar Type) deriving (Eq, Show)
+
+instance Semigroup Subst where
+  (Subst s1) <> (Subst s2) = Subst (Map.map (subst (Subst s1)) s2 <> s1)
+
+instance Monoid Subst where
+  mempty = Subst mempty
 
 -- Create a singleton substitution
 singleSubst :: TVar -> Type -> Subst
@@ -175,6 +181,9 @@ This is the section defining the main context in which we'll perform inference
 newtype Infer a = Infer (ReaderT (Set.Set TVar) (StateT Int (Except TypeError)) a)
   deriving (Functor, Applicative, Monad, MonadReader (Set.Set TVar), MonadError TypeError)
 
+runInfer :: Infer a -> Either TypeError a
+runInfer (Infer m) = runExcept (fst <$> runStateT (runReaderT m Set.empty) 0)
+
 -- Generate a fresh type containing a type variable
 fresh :: Infer TVar
 fresh = Infer $ do
@@ -202,7 +211,7 @@ withCtx a (Infer m) = Infer (local (Set.insert a) m)
 {- CONSTRAINT GENERATION -}
 
 -- Represents an ordered collection of assumptions we've gathered so far
-newtype Assumption = Assumption {assumptions :: [(Var, Type)]} deriving (Semigroup, Monoid)
+newtype Assumption = Assumption {assumptions :: [(Var, Type)]} deriving (Show, Semigroup, Monoid)
 
 -- Remove the assumptions associated with some variable
 removeAssumption :: Var -> Assumption -> Assumption
@@ -273,7 +282,7 @@ solve cs = solve' (nextSolvable cs)
       SameType t1 t2 -> do
         su1 <- unify t1 t2
         su2 <- solve (map (subst su1) cs)
-        return (su1 <> su2)
+        return (su2 <> su1)
       ImplicitlyInstantiates t1 bound t2 -> solve (ExplicitlyInstantiates t1 (generalize bound t2) : cs)
       ExplicitlyInstantiates t sc -> do
         sc' <- instantiate sc
@@ -286,7 +295,7 @@ unify t (TVar a) = bind a t
 unify (TFunc t1 t2) (TFunc t3 t4) = do
   su1 <- unify t1 t3
   su2 <- unify (subst su1 t2) (subst su1 t4)
-  return (su1 <> su2)
+  return (su2 <> su1)
 unify t1 t2 = throwError (TypeMismatch t1 t2)
 
 bind :: TVar -> Type -> Infer Subst
