@@ -130,7 +130,7 @@ instance FreeTypeVars Type where
   ftv TInt = Set.empty
   ftv TString = Set.empty
   ftv (TVar a) = Set.singleton a
-  ftv (TFunc t1 t2) = ftv t1 <> ftv t2
+  ftv (TFunc t1 t2) = Set.union (ftv t1) (ftv t2)
 
 instance FreeTypeVars TVar where
   ftv = Set.singleton
@@ -139,4 +139,16 @@ instance FreeTypeVars Scheme where
   ftv (Forall vars t) = Set.difference (ftv t) (Set.fromList vars)
 
 instance (Ord a, FreeTypeVars a) => FreeTypeVars (Set.Set a) where
-  ftv = foldr (Set.union . ftv) Set.empty
+  ftv = foldMap ftv
+
+-- This is a class allowing us to detect which variables are important in a constraint, or sequence of them
+class ActiveTypeVars a where
+  atv :: a -> Set.Set TVar
+
+instance ActiveTypeVars Constraint where
+  atv (SameType t1 t2) = Set.union (ftv t1) (ftv t2)
+  atv (ExplicitlyInstantiates t sc) = Set.union (ftv t) (ftv sc)
+  atv (ImplicitlyInstantiates t1 vars t2) = Set.union (ftv t1) (Set.intersection (ftv vars) (ftv t2))
+
+instance ActiveTypeVars a => ActiveTypeVars [a] where
+  atv = foldMap atv
