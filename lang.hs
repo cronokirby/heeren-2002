@@ -187,3 +187,20 @@ generalize :: Set.Set TVar -> Type -> Scheme
 generalize free t = Forall as t
   where
     as = Set.toList (Set.difference (ftv t) free)
+
+{- CONSTRAINT GENERATION -}
+
+-- Represents an ordered collection of assumptions we've gathered so far
+newtype Assumption = Assumption {assumptions :: [(Var, Type)]} deriving (Semigroup, Monoid)
+
+-- Remove the assumptions associated with some variable
+removeAssumption :: Var -> Assumption -> Assumption
+removeAssumption v (Assumption as) = Assumption (filter ((/= v) . fst) as)
+
+-- An assumption about a single type
+singleAssumption :: Var -> Type -> Assumption
+singleAssumption v t = Assumption [(v, t)]
+
+-- Extend an assumption with a single variable and type pair
+extendAssumption :: Var -> Type -> Assumption -> Assumption
+extendAssumption v t as = singleAssumption v t <> as
