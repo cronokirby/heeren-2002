@@ -2,6 +2,9 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 
+import Control.Monad.Except
+import Control.Monad.Reader
+import Control.Monad.State
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
@@ -152,3 +155,35 @@ instance ActiveTypeVars Constraint where
 
 instance ActiveTypeVars a => ActiveTypeVars [a] where
   atv = foldMap atv
+
+{- INFERENCE
+
+This is the section defining the main context in which we'll perform inference
+-}
+
+-- This is the context in which we perform our type checking
+--
+-- We have access to a set of bound type variables, as well as the ability to throw errors,
+-- and a source of fresh type variables
+newtype Infer a = Infer (ReaderT (Set.Set TVar) (StateT Int (Except TypeError)) a)
+  deriving (Functor, Applicative, Monad, MonadReader (Set.Set TVar), MonadError TypeError)
+
+-- Generate a fresh type containing a type variable
+fresh :: Infer Type
+fresh = Infer $ do
+  count <- get
+  put (count + 1)
+  return (TVar ("$" <> show count))
+
+-- Instantiate some type scheme by supplying a fresh set of variables for all the bound variables
+instantiate :: Scheme -> Infer Type
+instantiate (Forall vars t) = do
+  newVars <- mapM (const fresh) vars
+  let sub = foldMap (uncurry singleSubst) (zip vars newVars)
+  return (subst sub t)
+
+-- Generalize a type into a scheme by closing over all variables appearing in the type not bound elsewhere
+generalize :: Set.Set TVar -> Type -> Scheme
+generalize free t = Forall as t
+  where
+    as = Set.toList (Set.difference (ftv t) free)
