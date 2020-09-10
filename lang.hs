@@ -121,3 +121,22 @@ instance Substitutable Constraint where
   subst s (SameType t1 t2) = SameType (subst s t1) (subst s t2)
   subst s (ExplicitlyInstantiates t sc) = ExplicitlyInstantiates (subst s t) (subst s sc)
   subst s (ImplicitlyInstantiates t1 vars t2) = ImplicitlyInstantiates (subst s t1) (subst s vars) (subst s t2)
+
+-- A class used to calculate the free type variables in some type
+class FreeTypeVars a where
+  ftv :: a -> Set.Set TVar
+
+instance FreeTypeVars Type where
+  ftv TInt = Set.empty
+  ftv TString = Set.empty
+  ftv (TVar a) = Set.singleton a
+  ftv (TFunc t1 t2) = ftv t1 <> ftv t2
+
+instance FreeTypeVars TVar where
+  ftv = Set.singleton
+
+instance FreeTypeVars Scheme where
+  ftv (Forall vars t) = Set.difference (ftv t) (Set.fromList vars)
+
+instance (Ord a, FreeTypeVars a) => FreeTypeVars (Set.Set a) where
+  ftv = foldr (Set.union . ftv) Set.empty
