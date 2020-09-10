@@ -32,6 +32,9 @@ data Type
 -- The idea is that we quantify over variables appearing in the resulting type.
 data Scheme = Forall [TVar] Type deriving (Eq, Show)
 
+-- Represents some kind of binary operation between two things
+data BinOp = Add | Mul | Concat
+
 -- Represents the basic expressions in our language.
 --
 -- We also have a type parameter `t`, which is used to allow
@@ -43,13 +46,15 @@ data Expr t
     StrLitt String
   | -- A reference to a variable name
     Name Var
+  | -- Represents the application of some kind of binary operator
+    BinOp (Expr t) (Expr t)
   | -- A function application between two expressions
     Apply (Expr t) (Expr t)
   | -- A lambda introducing a new variable, and producing an expression
-    Lambda Ident t (Expr t)
+    Lambda Var t (Expr t)
   | -- Represents a let expression, binding a variable known to have type t to an expression
     -- and then uses that inside the resulting expression
-    Let Ident t (Expr t) (Expr t)
+    Let Var t (Expr t) (Expr t)
   deriving (Eq, Show)
 
 -- Represents a kind of type annotation with no information whatsoever
