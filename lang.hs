@@ -41,7 +41,12 @@ data Type
 data Scheme = Forall [TVar] Type deriving (Eq, Show)
 
 -- Represents some kind of binary operation between two things
-data BinOp = Add | Mul | Concat
+data BinOp = Add | Mul | Concat deriving (Eq, Show)
+
+opType :: BinOp -> Type
+opType Add = TInt `TFunc` (TInt `TFunc` TInt)
+opType Mul = TInt `TFunc` (TInt `TFunc` TInt)
+opType Concat = TString `TFunc` (TString `TFunc` TString)
 
 -- Represents the basic expressions in our language.
 --
@@ -55,7 +60,7 @@ data Expr t
   | -- A reference to a variable name
     Name Var
   | -- Represents the application of some kind of binary operator
-    BinOp (Expr t) (Expr t)
+    BinOp BinOp (Expr t) (Expr t)
   | -- A function application between two expressions
     Apply (Expr t) (Expr t)
   | -- A lambda introducing a new variable, and producing an expression
@@ -169,17 +174,17 @@ newtype Infer a = Infer (ReaderT (Set.Set TVar) (StateT Int (Except TypeError)) 
   deriving (Functor, Applicative, Monad, MonadReader (Set.Set TVar), MonadError TypeError)
 
 -- Generate a fresh type containing a type variable
-fresh :: Infer Type
+fresh :: Infer TVar
 fresh = Infer $ do
   count <- get
   put (count + 1)
-  return (TVar ("$" <> show count))
+  return ("$" <> show count)
 
 -- Instantiate some type scheme by supplying a fresh set of variables for all the bound variables
 instantiate :: Scheme -> Infer Type
 instantiate (Forall vars t) = do
   newVars <- mapM (const fresh) vars
-  let sub = foldMap (uncurry singleSubst) (zip vars newVars)
+  let sub = foldMap (uncurry singleSubst) (zip vars (map TVar newVars))
   return (subst sub t)
 
 -- Generalize a type into a scheme by closing over all variables appearing in the type not bound elsewhere
@@ -187,6 +192,10 @@ generalize :: Set.Set TVar -> Type -> Scheme
 generalize free t = Forall as t
   where
     as = Set.toList (Set.difference (ftv t) free)
+
+-- Extend the inference context with a certain bound type variable
+withCtx :: TVar -> Infer a -> Infer a
+withCtx a (Infer m) = Infer (local (Set.insert a) m)
 
 {- CONSTRAINT GENERATION -}
 
@@ -204,3 +213,38 @@ singleAssumption v t = Assumption [(v, t)]
 -- Extend an assumption with a single variable and type pair
 extendAssumption :: Var -> Type -> Assumption -> Assumption
 extendAssumption v t as = singleAssumption v t <> as
+
+-- Lookup all of the types associated with a certain variable
+lookupAssumption :: Var -> Assumption -> [Type]
+lookupAssumption target (Assumption as) = [t | (v, t) <- as, v == target]
+
+-- Infer the assumptions and constraints for an expression
+infer :: Expr t -> Infer (Assumption, [Constraint], Type)
+infer expr = case expr of
+  IntLitt _ -> return (mempty, [], TInt)
+  StrLitt _ -> return (mempty, [], TString)
+  Name v -> do
+    tv <- TVar <$> fresh
+    return (singleAssumption v tv, [], tv)
+  Lambda v _ e -> do
+    a <- fresh
+    let tv = TVar a
+    (as, cs, t) <- withCtx a (infer e)
+    return (removeAssumption v as, [SameType t' tv | t' <- lookupAssumption v as] <> cs, TFunc tv t)
+  Apply e1 e2 -> do
+    (as1, cs1, t1) <- infer e1
+    (as2, cs2, t2) <- infer e2
+    tv <- TVar <$> fresh
+    return (as1 <> as2, [SameType t1 (TFunc t2 tv)] <> cs1 <> cs2, tv)
+  Let v _ e1 e2 -> do
+    (as1, cs1, t1) <- infer e1
+    (as2, cs2, t2) <- infer e2
+    bound <- ask
+    return (removeAssumption v (as1 <> as2), [ImplicitlyInstantiates t' bound t1 | t' <- lookupAssumption v as2] <> cs1 <> cs2, t2)
+  BinOp op e1 e2 -> do
+    (as1, cs1, t1) <- infer e1
+    (as2, cs2, t2) <- infer e2
+    tv <- TVar <$> fresh
+    let u1 = t1 `TFunc` (t2 `TFunc` tv)
+        u2 = opType op
+    return (as1 <> as2, [SameType u1 u2] <> cs1 <> cs2, tv)
