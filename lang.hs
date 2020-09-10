@@ -348,44 +348,38 @@ inferType expr = do
   unless (Set.null unbounds) (throwError (UnboundVar (Set.findMin unbounds)))
   let cs' = [ExplicitlyInstantiates t s | (x, s) <- envBindings env, t <- lookupAssumption x as]
   sub <- lift (solve (cs' <> cs))
-  return (runReader (apply sub expr') Set.empty)
+  return (apply sub Set.empty expr')
   where
-    apply :: Subst -> Expr Type -> Reader (Set.Set TVar) (Expr Scheme)
-    apply sub expr = case expr of
-      IntLitt n -> return (IntLitt n)
-      StrLitt s -> return (StrLitt s)
-      Name v -> return (Name v)
-      Lambda v t e -> do
-        (scheme, newBound) <- schemeFor t
-        e' <- local (const newBound) (apply sub e)
-        return (Lambda v scheme e')
-      Apply t1 e1 t2 e2 -> do
-        (s1, _) <- schemeFor t1
-        (s2, _) <- schemeFor t2
-        e1' <- apply sub e1
-        e2' <- apply sub e2
-        return (Apply s1 e1' s2 e2')
-      Let v t1 e1 t2 e2 -> do
-        e1' <- apply sub e1
-        (s1, newBound) <- schemeFor t1
-        (e2', s2) <- local (const newBound) $ do
-          e2'' <- apply sub e2
-          (s2', _) <- schemeFor t2
-          return (e2'', s2')
-        return (Let v s1 e1' s2 e2')
-      BinOp op t1 e1 t2 e2 -> do
-        (s1, _) <- schemeFor t1
-        (s2, _) <- schemeFor t2
-        e1' <- apply sub e1
-        e2' <- apply sub e2
-        return (BinOp op s1 e1' s2 e2')
+    apply :: Subst -> Set.Set TVar -> Expr Type -> Expr Scheme
+    apply sub bound expr = case expr of
+      IntLitt n -> IntLitt n
+      StrLitt s -> StrLitt s
+      Name v -> Name v
+      Lambda v t e ->
+        let scheme@(Forall as _) = schemeFor bound t
+            e' = apply sub (Set.union bound (Set.fromList as)) e
+        in Lambda v scheme e'
+      Apply t1 e1 t2 e2 ->
+        let s1@(Forall as1 _) = schemeFor bound t1
+            s2@(Forall as2 _) = schemeFor bound t2
+            bound1 = Set.union bound (Set.fromList as1)
+            bound2 = Set.union bound (Set.fromList as2)
+        in Apply s1 (apply sub bound1 e1) s2 (apply sub bound2 e2)
+      Let v t1 e1 t2 e2 ->
+        let s1@(Forall as1 _) = schemeFor bound t1
+            bound1 = Set.union bound (Set.fromList as1)
+            e1' = apply sub bound1 e1
+            s2@(Forall as2 _) = schemeFor bound1 t2
+            bound2 = Set.union bound1 (Set.fromList as2)
+            e2' = apply sub bound2 e2
+        in Let v s1 e1' s2 e2'
+      BinOp op t1 e1 t2 e2 ->
+        let s1 = schemeFor bound t1
+            s2 = schemeFor bound t2
+        in BinOp op s1 (apply sub bound e1) s2 (apply sub bound e2)
       where
-        schemeFor :: Type -> Reader (Set.Set TVar) (Scheme, Set.Set TVar)
-        schemeFor t = do
-          let t' = subst sub t
-          bound <- ask
-          let scheme@(Forall as _) = generalize bound t'
-          return (scheme, Set.union bound (Set.fromList as))
+        schemeFor :: Set.Set TVar -> Type -> Scheme
+        schemeFor bound t = generalize bound (subst sub t)
 
 typeTree :: Expr Unknown -> Either TypeError (Expr Scheme)
 typeTree expr = runInfer (runReaderT (inferType expr) emptyEnv)
