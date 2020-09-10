@@ -1,12 +1,15 @@
+{-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE DeriveTraversable #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 
-import Debug.Trace
 import Control.Monad.Except
-
 import Control.Monad.Reader
 import Control.Monad.State
+  ( MonadState (get, put),
+    StateT (runStateT),
+  )
 import Data.List (delete, find)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -63,18 +66,18 @@ data Expr t
   | -- A reference to a variable name
     Name Var
   | -- Represents the application of some kind of binary operator
-    BinOp BinOp (Expr t) (Expr t)
+    BinOp BinOp t (Expr t) t (Expr t)
   | -- A function application between two expressions
-    Apply (Expr t) (Expr t)
+    Apply t (Expr t) t (Expr t)
   | -- A lambda introducing a new variable, and producing an expression
-    Lambda Var (Expr t)
+    Lambda Var t (Expr t)
   | -- Represents a let expression, binding a variable known to have type t to an expression
     -- and then uses that inside the resulting expression
-    Let Var t (Expr t) (Expr t)
-  deriving (Eq, Show)
+    Let Var t (Expr t) t (Expr t)
+  deriving (Eq, Show, Functor, Foldable, Traversable)
 
 -- Represents a kind of type annotation with no information whatsoever
-data Unknown = Unknown deriving (Eq, Show)
+data Unknown = U deriving (Eq, Show)
 
 -- Represents some kind of type error in our language
 data TypeError = TypeMismatch Type Type | InfiniteType TVar Type | UnboundVar Var deriving (Eq, Show)
@@ -236,35 +239,41 @@ assumptionVars :: Assumption -> Set.Set Var
 assumptionVars (Assumption as) = Set.fromList (map fst as)
 
 -- Infer the assumptions and constraints for an expression
-infer :: Expr t -> Infer (Assumption, [Constraint], Type)
+infer :: Expr Unknown -> Infer (Assumption, [Constraint], Type, Expr Type)
 infer expr = case expr of
-  IntLitt _ -> return (mempty, [], TInt)
-  StrLitt _ -> return (mempty, [], TString)
+  IntLitt n -> return (mempty, [], TInt, IntLitt n)
+  StrLitt s -> return (mempty, [], TString, StrLitt s)
   Name v -> do
     tv <- TVar <$> fresh
-    return (singleAssumption v tv, [], tv)
-  Lambda v e -> do
+    return (singleAssumption v tv, [], tv, Name v)
+  Lambda v _ e -> do
     a <- fresh
     let tv = TVar a
-    (as, cs, t) <- withCtx a (infer e)
-    return (removeAssumption v as, [SameType t' tv | t' <- lookupAssumption v as] <> cs, TFunc tv t)
-  Apply e1 e2 -> do
-    (as1, cs1, t1) <- infer e1
-    (as2, cs2, t2) <- infer e2
+    (as, cs, t, e') <- withCtx a (infer e)
+    let inferred = TFunc tv t
+    return (removeAssumption v as, [SameType t' tv | t' <- lookupAssumption v as] <> cs, inferred, Lambda v t e')
+  Apply _ e1 _ e2 -> do
+    (as1, cs1, t1, e1') <- infer e1
+    (as2, cs2, t2, e2') <- infer e2
     tv <- TVar <$> fresh
-    return (as1 <> as2, [SameType t1 (TFunc t2 tv)] <> cs1 <> cs2, tv)
-  Let v _ e1 e2 -> do
-    (as1, cs1, t1) <- infer e1
-    (as2, cs2, t2) <- infer e2
+    return (as1 <> as2, [SameType t1 (TFunc t2 tv)] <> cs1 <> cs2, tv, Apply t1 e1' t2 e2')
+  Let v _ e1 _ e2 -> do
+    (as1, cs1, t1, e1') <- infer e1
+    (as2, cs2, t2, e2') <- infer e2
     bound <- ask
-    return (removeAssumption v (as1 <> as2), [ImplicitlyInstantiates t' bound t1 | t' <- lookupAssumption v as2] <> cs1 <> cs2, t2)
-  BinOp op e1 e2 -> do
-    (as1, cs1, t1) <- infer e1
-    (as2, cs2, t2) <- infer e2
+    return
+      ( removeAssumption v (as1 <> as2),
+        [ImplicitlyInstantiates t' bound t1 | t' <- lookupAssumption v as2] <> cs1 <> cs2,
+        t2,
+        Let v t1 e1' t2 e2'
+      )
+  BinOp op _ e1 _ e2 -> do
+    (as1, cs1, t1, e1') <- infer e1
+    (as2, cs2, t2, e2') <- infer e2
     tv <- TVar <$> fresh
     let u1 = t1 `TFunc` (t2 `TFunc` tv)
         u2 = opType op
-    return (as1 <> as2, [SameType u1 u2] <> cs1 <> cs2, tv)
+    return (as1 <> as2, [SameType u1 u2] <> cs1 <> cs2, tv, BinOp op t1 e1' t2 e2')
 
 {- CONSTRAINT SOLVER -}
 
@@ -331,33 +340,52 @@ envVars :: Env -> Set.Set Var
 envVars = Set.fromList . map fst . envBindings
 
 -- Infer the type for a given expression, inside of a given environment
-inferType :: Show t => Expr t -> ReaderT Env Infer Type
+inferType :: Expr Unknown -> ReaderT Env Infer (Expr Scheme)
 inferType expr = do
   env <- ask
-  (as, cs, t) <- lift (infer expr)
+  (as, cs, t, expr') <- lift (infer expr)
   let unbounds = Set.difference (assumptionVars as) (envVars env)
   unless (Set.null unbounds) (throwError (UnboundVar (Set.findMin unbounds)))
   let cs' = [ExplicitlyInstantiates t s | (x, s) <- envBindings env, t <- lookupAssumption x as]
   sub <- lift (solve (cs' <> cs))
-  return (subst sub t)
+  return (runReader (apply sub expr') Set.empty)
+  where
+    apply :: Subst -> Expr Type -> Reader (Set.Set TVar) (Expr Scheme)
+    apply sub expr = case expr of
+      IntLitt n -> return (IntLitt n)
+      StrLitt s -> return (StrLitt s)
+      Name v -> return (Name v)
+      Lambda v t e -> do
+        (scheme, newBound) <- schemeFor t
+        e' <- local (const newBound) (apply sub e)
+        return (Lambda v scheme e')
+      Apply t1 e1 t2 e2 -> do
+        (s1, _) <- schemeFor t1
+        (s2, _) <- schemeFor t2
+        e1' <- apply sub e1
+        e2' <- apply sub e2
+        return (Apply s1 e1' s2 e2')
+      Let v t1 e1 t2 e2 -> do
+        e1' <- apply sub e1
+        (s1, newBound) <- schemeFor t1
+        (e2', s2) <- local (const newBound) $ do
+          e2'' <- apply sub e2
+          (s2', _) <- schemeFor t2
+          return (e2'', s2')
+        return (Let v s1 e1' s2 e2')
+      BinOp op t1 e1 t2 e2 -> do
+        (s1, _) <- schemeFor t1
+        (s2, _) <- schemeFor t2
+        e1' <- apply sub e1
+        e2' <- apply sub e2
+        return (BinOp op s1 e1' s2 e2')
+      where
+        schemeFor :: Type -> Reader (Set.Set TVar) (Scheme, Set.Set TVar)
+        schemeFor t = do
+          let t' = subst sub t
+          bound <- ask
+          let scheme@(Forall as _) = generalize bound t'
+          return (scheme, Set.union bound (Set.fromList as))
 
-typeCheck :: Show t => Expr t -> ReaderT Env Infer (Expr Scheme)
-typeCheck expr = case expr of
-  IntLitt n -> return (IntLitt n)
-  StrLitt s -> return (StrLitt s)
-  Name v -> return (Name v)
-  Apply e1 e2 -> Apply <$> typeCheck e1 <*> typeCheck e2
-  BinOp op e1 e2 -> BinOp op <$> typeCheck e1 <*> typeCheck e2
-  Lambda v e -> do
-    let scheme' = Forall ["x"] (TVar "x")
-    e' <- local (extendEnv v scheme') (typeCheck e)
-    return (Lambda v e')
-  Let v _ e1 e2 -> do
-    tv <- inferType e1
-    let scheme = generalize Set.empty tv
-    e1' <- typeCheck e1
-    e2' <- local (extendEnv v scheme) (typeCheck e2)
-    return (Let v scheme e1' e2')
-
-typeTree :: Show t => Expr t -> Either TypeError (Expr Scheme)
-typeTree expr = runInfer (runReaderT (typeCheck expr) emptyEnv)
+typeTree :: Expr Unknown -> Either TypeError (Expr Scheme)
+typeTree expr = runInfer (runReaderT (inferType expr) emptyEnv)
