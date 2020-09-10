@@ -1,3 +1,5 @@
+import qualified Data.Set as Set
+
 {- BASIC DEFINITIONS
 
 This section defines the basic constructs we will be working with, namely, the AST
@@ -7,18 +9,28 @@ for our tiny language, as well as the definition of what a type and scheme is.
 -- Represents what kind of type we use for types
 type Ident = String
 
+-- Represents a kind of type variable
+type TVar = Ident
+
+-- Represents a kind of variable
+type Var = Ident
+
 -- Represents some kind of type we can have, either as an annotation, or a final type
 data Type
-  = TVar Ident
-  | TInt
-  | TString
-  | TFunc Type Type
+  = -- A reference to some type variable
+    TVar TVar
+  | -- The primitive integer type
+    TInt
+  | -- The primitive string type
+    TString
+  | -- The function type between two other types
+    TFunc Type Type
   deriving (Eq, Show)
 
 -- Represents a scheme, or a polymorphic type
 --
 -- The idea is that we quantify over variables appearing in the resulting type.
-data Scheme = Forall [Ident] Type deriving (Eq, Show)
+data Scheme = Forall [TVar] Type deriving (Eq, Show)
 
 -- Represents the basic expressions in our language.
 --
@@ -30,7 +42,7 @@ data Expr t
   | -- A String litteral
     StrLitt String
   | -- A reference to a variable name
-    Name Ident
+    Name Var
   | -- A function application between two expressions
     Apply (Expr t) (Expr t)
   | -- A lambda introducing a new variable, and producing an expression
@@ -45,3 +57,21 @@ data Unknown = Unknown deriving (Eq, Show)
 
 -- Represents some kind of type error in our language
 data TypeError = TypeError deriving (Eq, Show)
+
+{- CONSTRAINTS & SUBSTUTITIONS
+
+This section defines the basic aspects of constraints, which are produced by the constraint
+generation phase, and then consumed to produce a substitution.
+-}
+
+-- Represents some kind of constraint we generate during our gathering phase
+--
+-- This provides us with information about what certain type variables need to look like,
+-- and allows us to eventually produce a valid substitution for these variables
+data Constraint
+  = -- An assertion that two types must be equal
+    EqConst Type Type
+  | -- An assertion that a type can be seen as an instance of some scheme
+    ExplicitlyInstantiates Type Scheme
+  | -- An assertion that the first type should be an instance of the second, generalized over some type variables
+    ImplicitlyInstantiates Type (Set.Set TVar) Type
