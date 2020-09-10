@@ -5,6 +5,7 @@
 import Control.Monad.Except
 import Control.Monad.Reader
 import Control.Monad.State
+import Data.List (delete, find)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
@@ -74,7 +75,7 @@ data Expr t
 data Unknown = Unknown deriving (Eq, Show)
 
 -- Represents some kind of type error in our language
-data TypeError = TypeError deriving (Eq, Show)
+data TypeError = TypeMismatch Type Type | InfiniteType TVar Type deriving (Eq, Show)
 
 {- CONSTRAINTS & SUBSTUTITIONS
 
@@ -93,6 +94,7 @@ data Constraint
     ExplicitlyInstantiates Type Scheme
   | -- An assertion that the first type should be an instance of the second, generalized over some type variables
     ImplicitlyInstantiates Type (Set.Set TVar) Type
+  deriving (Eq, Show)
 
 -- Represents a substitution of some type variables for a given type
 newtype Subst = Subst (Map.Map TVar Type) deriving (Eq, Show, Semigroup, Monoid)
@@ -248,3 +250,47 @@ infer expr = case expr of
     let u1 = t1 `TFunc` (t2 `TFunc` tv)
         u2 = opType op
     return (as1 <> as2, [SameType u1 u2] <> cs1 <> cs2, tv)
+
+{- CONSTRAINT SOLVER -}
+
+-- Solve a set of constraints by inferring a substitution
+solve :: [Constraint] -> Infer Subst
+solve [] = return mempty
+solve cs = solve' (nextSolvable cs)
+  where
+    nextSolvable :: [Constraint] -> (Constraint, [Constraint])
+    nextSolvable xs = case find solvable (chooseOne xs) of
+      Just c -> c
+      _ -> error "Couldn't find solvable constraint"
+      where
+        chooseOne xs = [(x, ys) | x <- xs, let ys = delete x xs]
+        solvable (SameType _ _, _) = True
+        solvable (ExplicitlyInstantiates _ _, _) = True
+        solvable (ImplicitlyInstantiates t1 bound t2, cs) =
+          Set.null (Set.intersection (atv cs) (Set.difference (ftv t2) bound))
+    solve' :: (Constraint, [Constraint]) -> Infer Subst
+    solve' (constraint, cs) = case constraint of
+      SameType t1 t2 -> do
+        su1 <- unify t1 t2
+        su2 <- solve (map (subst su1) cs)
+        return (su1 <> su2)
+      ImplicitlyInstantiates t1 bound t2 -> solve (ExplicitlyInstantiates t1 (generalize bound t2) : cs)
+      ExplicitlyInstantiates t sc -> do
+        sc' <- instantiate sc
+        solve (SameType t sc' : cs)
+
+unify :: Type -> Type -> Infer Subst
+unify t1 t2 | t1 == t2 = return mempty
+unify (TVar a) t = bind a t
+unify t (TVar a) = bind a t
+unify (TFunc t1 t2) (TFunc t3 t4) = do
+  su1 <- unify t1 t3
+  su2 <- unify (subst su1 t2) (subst su1 t4)
+  return (su1 <> su2)
+unify t1 t2 = throwError (TypeMismatch t1 t2)
+
+bind :: TVar -> Type -> Infer Subst
+bind a t
+  | t == TVar a = return mempty
+  | Set.member a (ftv t) = throwError (InfiniteType a t)
+  | otherwise = return (singleSubst a t)
