@@ -66,14 +66,14 @@ data Expr t
   | -- A reference to a variable name
     Name Var
   | -- Represents the application of some kind of binary operator
-    BinOp BinOp t (Expr t) t (Expr t)
+    BinOp BinOp (Expr t) (Expr t)
   | -- A function application between two expressions
-    Apply t (Expr t) t (Expr t)
+    Apply (Expr t) (Expr t)
   | -- A lambda introducing a new variable, and producing an expression
     Lambda Var t (Expr t)
   | -- Represents a let expression, binding a variable known to have type t to an expression
     -- and then uses that inside the resulting expression
-    Let Var t (Expr t) t (Expr t)
+    Let Var t (Expr t) (Expr t)
   deriving (Eq, Show, Functor, Foldable, Traversable)
 
 -- Represents a kind of type annotation with no information whatsoever
@@ -252,12 +252,12 @@ infer expr = case expr of
     (as, cs, t, e') <- withCtx a (infer e)
     let inferred = TFunc tv t
     return (removeAssumption v as, [SameType t' tv | t' <- lookupAssumption v as] <> cs, inferred, Lambda v t e')
-  Apply _ e1 _ e2 -> do
+  Apply e1 e2 -> do
     (as1, cs1, t1, e1') <- infer e1
     (as2, cs2, t2, e2') <- infer e2
     tv <- TVar <$> fresh
-    return (as1 <> as2, [SameType t1 (TFunc t2 tv)] <> cs1 <> cs2, tv, Apply t1 e1' t2 e2')
-  Let v _ e1 _ e2 -> do
+    return (as1 <> as2, [SameType t1 (TFunc t2 tv)] <> cs1 <> cs2, tv, Apply e1' e2')
+  Let v _ e1 e2 -> do
     (as1, cs1, t1, e1') <- infer e1
     (as2, cs2, t2, e2') <- infer e2
     bound <- ask
@@ -265,15 +265,15 @@ infer expr = case expr of
       ( removeAssumption v (as1 <> as2),
         [ImplicitlyInstantiates t' bound t1 | t' <- lookupAssumption v as2] <> cs1 <> cs2,
         t2,
-        Let v t1 e1' t2 e2'
+        Let v t1 e1' e2'
       )
-  BinOp op _ e1 _ e2 -> do
+  BinOp op e1 e2 -> do
     (as1, cs1, t1, e1') <- infer e1
     (as2, cs2, t2, e2') <- infer e2
     tv <- TVar <$> fresh
     let u1 = t1 `TFunc` (t2 `TFunc` tv)
         u2 = opType op
-    return (as1 <> as2, [SameType u1 u2] <> cs1 <> cs2, tv, BinOp op t1 e1' t2 e2')
+    return (as1 <> as2, [SameType u1 u2] <> cs1 <> cs2, tv, BinOp op e1' e2')
 
 {- CONSTRAINT SOLVER -}
 
@@ -358,25 +358,17 @@ inferType expr = do
       Lambda v t e ->
         let scheme@(Forall as _) = schemeFor bound t
             e' = apply sub (Set.union bound (Set.fromList as)) e
-        in Lambda v scheme e'
-      Apply t1 e1 t2 e2 ->
-        let s1@(Forall as1 _) = schemeFor bound t1
-            s2@(Forall as2 _) = schemeFor bound t2
-            bound1 = Set.union bound (Set.fromList as1)
-            bound2 = Set.union bound (Set.fromList as2)
-        in Apply s1 (apply sub bound1 e1) s2 (apply sub bound2 e2)
-      Let v t1 e1 t2 e2 ->
+         in Lambda v scheme e'
+      Apply e1 e2 ->
+        Apply (apply sub bound e1) (apply sub bound e2)
+      Let v t1 e1 e2 ->
         let s1@(Forall as1 _) = schemeFor bound t1
             bound1 = Set.union bound (Set.fromList as1)
             e1' = apply sub bound1 e1
-            s2@(Forall as2 _) = schemeFor bound1 t2
-            bound2 = Set.union bound1 (Set.fromList as2)
-            e2' = apply sub bound2 e2
-        in Let v s1 e1' s2 e2'
-      BinOp op t1 e1 t2 e2 ->
-        let s1 = schemeFor bound t1
-            s2 = schemeFor bound t2
-        in BinOp op s1 (apply sub bound e1) s2 (apply sub bound e2)
+            e2' = apply sub bound1 e2
+         in Let v s1 e1' e2'
+      BinOp op e1 e2 ->
+        BinOp op (apply sub bound e1) (apply sub bound e2)
       where
         schemeFor :: Set.Set TVar -> Type -> Scheme
         schemeFor bound t = generalize bound (subst sub t)
